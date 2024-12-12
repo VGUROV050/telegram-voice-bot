@@ -1,6 +1,5 @@
 from telegram import Update
-from telegram.ext import Updater, CommandHandler, MessageHandler, CallbackContext, Application, ContextTypes
-from telegram import filters
+from telegram.ext import Application, MessageHandler, CallbackContext, filters
 import os
 from pydub import AudioSegment
 import speech_recognition as sr
