@@ -1,6 +1,6 @@
 from telegram import Update
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
-import requests
+from telegram.ext import Updater, CommandHandler, MessageHandler, CallbackContext, Application, ContextTypes
+from telegram import filters
 import os
 from pydub import AudioSegment
 import speech_recognition as sr
@@ -9,12 +9,12 @@ import speech_recognition as sr
 BOT_TOKEN = os.getenv('BOT_TOKEN')  # Токен передадим через Render
 
 # Функция для обработки голосовых сообщений
-def handle_voice(update: Update, context: CallbackContext) -> None:
-    voice_file = update.message.voice.get_file()
+async def handle_voice(update: Update, context: CallbackContext) -> None:
+    voice_file = await update.message.voice.get_file()
     file_path = "voice.ogg"
 
     # Скачиваем аудио
-    voice_file.download(file_path)
+    await voice_file.download(file_path)
 
     # Конвертируем в WAV
     audio = AudioSegment.from_file(file_path)
@@ -27,11 +27,11 @@ def handle_voice(update: Update, context: CallbackContext) -> None:
         audio_data = recognizer.record(source)
         try:
             text = recognizer.recognize_google(audio_data, language="ru-RU")
-            update.message.reply_text(f"Распознанный текст: {text}")
+            await update.message.reply_text(f"Распознанный текст: {text}")
         except sr.UnknownValueError:
-            update.message.reply_text("Не удалось распознать текст.")
+            await update.message.reply_text("Не удалось распознать текст.")
         except sr.RequestError as e:
-            update.message.reply_text(f"Ошибка распознавания: {e}")
+            await update.message.reply_text(f"Ошибка распознавания: {e}")
 
     # Удаляем временные файлы
     os.remove(file_path)
@@ -39,15 +39,13 @@ def handle_voice(update: Update, context: CallbackContext) -> None:
 
 # Запуск бота
 def main() -> None:
-    updater = Updater(BOT_TOKEN)
-    dispatcher = updater.dispatcher
+    app = Application.builder().token(BOT_TOKEN).build()
 
     # Обработчики
-    dispatcher.add_handler(MessageHandler(Filters.voice, handle_voice))
+    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
 
     # Запуск
-    updater.start_polling()
-    updater.idle()
+    app.run_polling()
 
 if __name__ == '__main__':
     main()
