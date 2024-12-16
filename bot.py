@@ -34,8 +34,10 @@ async def handle_voice(update: Update, context: CallbackContext) -> None:
         audio_data = recognizer.record(source)
         try:
             text = recognizer.recognize_google(audio_data, language="ru-RU")
+            # Формируем сообщение с префиксом
+            message = f"/ifttt Create Task {text}"
             # Отправляем текст в группу
-            await context.bot.send_message(chat_id=GROUP_CHAT_ID, text=text)
+            await context.bot.send_message(chat_id=GROUP_CHAT_ID, text=message)
         except sr.UnknownValueError:
             await context.bot.send_message(chat_id=GROUP_CHAT_ID, text="Не удалось распознать текст.")
         except sr.RequestError as e:
