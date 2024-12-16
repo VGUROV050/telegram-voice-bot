@@ -3,6 +3,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackCo
 import os
 from pydub import AudioSegment
 import speech_recognition as sr
+import requests  # Импорт requests
 
 # Конфигурация
 BOT_TOKEN = os.getenv('BOT_TOKEN')  # Токен передадим через Render
