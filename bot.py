@@ -51,7 +51,7 @@ async def handle_voice(update: Update, context: CallbackContext) -> None:
             )
 
             if response.status_code == 200 or response.status_code == 204:
-                await update.message.reply_text("Задача успешно добавлена в Todoist!: {text}")
+                await update.message.reply_text(f"Задача успешно добавлена в Todoist!: {text}")
             else:
                 await update.message.reply_text(f"Ошибка добавления задачи: {response.text}")
             
