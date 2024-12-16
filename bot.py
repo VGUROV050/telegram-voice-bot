@@ -8,6 +8,7 @@ import speech_recognition as sr
 BOT_TOKEN = os.getenv('BOT_TOKEN')  # Токен передадим через Render
 # ID чата пользователя, которому нужно отправить текст
 GROUP_CHAT_ID = -1002433054865  # Замените на реальный chat_id
+TODOIST_API_TOKEN = os.getenv("TODOIST_API_TOKEN")
 
 async def get_chat_id(update: Update, context: CallbackContext) -> None:
     chat_id = update.message.chat_id
@@ -34,10 +35,27 @@ async def handle_voice(update: Update, context: CallbackContext) -> None:
         audio_data = recognizer.record(source)
         try:
             text = recognizer.recognize_google(audio_data, language="ru-RU")
-            # Формируем сообщение с префиксом
-            message = f"/ifttt Create Task {text}"
+            # Формируем задачу для Todoist
+            task_data = {
+                "content": text,
+            }
+
+             # Отправляем задачу в Todoist
+            response = requests.post(
+                "https://api.todoist.com/rest/v2/tasks",
+                headers={
+                    "Authorization": f"Bearer {TODOIST_API_TOKEN}"
+                },
+                json=task_data,
+            )
+
+            if response.status_code == 200 or response.status_code == 204:
+                await update.message.reply_text("Задача успешно добавлена в Todoist!")
+            else:
+                await update.message.reply_text(f"Ошибка добавления задачи: {response.text}")
+            
             # Отправляем текст в группу
-            await context.bot.send_message(chat_id=GROUP_CHAT_ID, text=message)
+            await context.bot.send_message(chat_id=GROUP_CHAT_ID, text=text)
         except sr.UnknownValueError:
             await context.bot.send_message(chat_id=GROUP_CHAT_ID, text="Не удалось распознать текст.")
         except sr.RequestError as e:
