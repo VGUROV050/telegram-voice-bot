@@ -51,12 +51,10 @@ async def handle_voice(update: Update, context: CallbackContext) -> None:
             )
 
             if response.status_code == 200 or response.status_code == 204:
-                await update.message.reply_text("Задача успешно добавлена в Todoist!")
+                await update.message.reply_text("Задача успешно добавлена в Todoist!: {text}")
             else:
                 await update.message.reply_text(f"Ошибка добавления задачи: {response.text}")
             
-            # Отправляем текст в группу
-            await context.bot.send_message(chat_id=GROUP_CHAT_ID, text=text)
         except sr.UnknownValueError:
             await context.bot.send_message(chat_id=GROUP_CHAT_ID, text="Не удалось распознать текст.")
         except sr.RequestError as e:
