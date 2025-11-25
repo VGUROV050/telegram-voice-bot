@@ -368,18 +368,75 @@ async def create_notion_task(text: str) -> tuple[bool, str]:
 
 
 def check_calendar_busy(service, start_time: datetime, end_time: datetime) -> list:
-    """Проверка занятости времени в календаре"""
+    """
+    Проверка занятости времени во ВСЕХ календарях пользователя через FreeBusy API.
+    Также проверяет основной календарь для получения названий событий.
+    """
+    busy_events = []
+    
     try:
-        events_result = service.events().list(
-            calendarId=GOOGLE_CALENDAR_ID,
-            timeMin=start_time.isoformat() + '+03:00',
-            timeMax=end_time.isoformat() + '+03:00',
-            singleEvents=True,
-            orderBy='startTime'
-        ).execute()
+        # 1. Используем FreeBusy для проверки всех календарей
+        # Получаем список всех календарей
+        calendar_list = service.calendarList().list().execute()
+        calendar_ids = [cal['id'] for cal in calendar_list.get('items', [])]
         
-        events = events_result.get('items', [])
-        return events
+        logger.info(f"Проверяю занятость в {len(calendar_ids)} календарях")
+        
+        # FreeBusy запрос
+        freebusy_query = {
+            "timeMin": start_time.isoformat() + '+03:00',
+            "timeMax": end_time.isoformat() + '+03:00',
+            "items": [{"id": cal_id} for cal_id in calendar_ids]
+        }
+        
+        freebusy_result = service.freebusy().query(body=freebusy_query).execute()
+        
+        # Собираем занятые слоты
+        for cal_id, cal_data in freebusy_result.get('calendars', {}).items():
+            busy_slots = cal_data.get('busy', [])
+            for slot in busy_slots:
+                busy_events.append({
+                    'calendar': cal_id,
+                    'start': slot.get('start'),
+                    'end': slot.get('end')
+                })
+        
+        # 2. Если есть занятость, получаем детали событий из основного календаря
+        if busy_events:
+            # Пробуем получить названия событий
+            for cal_id in calendar_ids:
+                try:
+                    events_result = service.events().list(
+                        calendarId=cal_id,
+                        timeMin=start_time.isoformat() + '+03:00',
+                        timeMax=end_time.isoformat() + '+03:00',
+                        singleEvents=True,
+                        orderBy='startTime'
+                    ).execute()
+                    
+                    for event in events_result.get('items', []):
+                        # Добавляем детали события
+                        event_start = event.get('start', {}).get('dateTime', event.get('start', {}).get('date', ''))
+                        busy_events.append({
+                            'summary': event.get('summary', 'Занято'),
+                            'start': event_start,
+                            'calendar': cal_id
+                        })
+                except Exception as e:
+                    logger.warning(f"Не удалось получить события из {cal_id}: {e}")
+        
+        # Убираем дубликаты (оставляем только с названием)
+        seen = set()
+        unique_events = []
+        for ev in busy_events:
+            if 'summary' in ev:
+                key = (ev.get('summary'), ev.get('start'))
+                if key not in seen:
+                    seen.add(key)
+                    unique_events.append(ev)
+        
+        return unique_events if unique_events else busy_events
+        
     except Exception as e:
         logger.error(f"Ошибка проверки занятости: {e}")
         return []
@@ -444,8 +501,13 @@ async def create_calendar_event(text: str, user_id: int) -> tuple[str, dict | No
         # Есть конфликт — формируем список занятых событий
         conflicts = []
         for ev in busy_events:
-            ev_title = ev.get('summary', 'Без названия')
-            ev_start = ev.get('start', {}).get('dateTime', '')[:16].replace('T', ' ')
+            ev_title = ev.get('summary', 'Занято')
+            ev_start_raw = ev.get('start', '')
+            # start может быть строкой или словарём
+            if isinstance(ev_start_raw, dict):
+                ev_start = ev_start_raw.get('dateTime', ev_start_raw.get('date', ''))[:16].replace('T', ' ')
+            else:
+                ev_start = str(ev_start_raw)[:16].replace('T', ' ')
             conflicts.append(f"• {ev_title} ({ev_start})")
         
         event_data["conflicts"] = conflicts
