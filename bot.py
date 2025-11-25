@@ -89,130 +89,111 @@ def get_google_calendar_service():
         return None
 
 
-def parse_meeting_time(text: str):
+async def parse_meeting_with_ai(text: str) -> tuple[str, datetime, datetime]:
     """
-    Парсинг времени встречи из текста.
-    Понимает:
-    - Точное время: 15:00, 10.30
-    - Время суток: утро/утром (9:00), день/днём (13:00), вечер/вечером (18:00)
-    - Относительные даты: сегодня, завтра, послезавтра, после завтра
-    - Дни недели: понедельник, вторник, среда и т.д.
-    - Через N часов/минут
+    Умный парсинг встречи через GPT.
+    Понимает естественный язык: "через пару часов", "на следующей неделе", "перед обедом" и т.д.
     """
-    text_lower = text.lower()
-    today = datetime.now()
+    import json
     
-    # Нормализация текста: "после завтра" -> "послезавтра"
-    text_lower = re.sub(r'после\s+завтра', 'послезавтра', text_lower)
+    now = datetime.now()
+    current_datetime = now.strftime("%Y-%m-%d %H:%M")
+    current_weekday = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"][now.weekday()]
     
-    # === ОПРЕДЕЛЯЕМ ВРЕМЯ ===
-    hour = None
-    minute = 0
+    system_prompt = f"""Ты помощник для извлечения информации о встречах из текста.
+Текущая дата и время: {current_datetime} ({current_weekday})
+
+Извлеки из текста пользователя:
+1. Название встречи (убери слова о времени/дате)
+2. Дату встречи (в формате YYYY-MM-DD)
+3. Время начала (в формате HH:MM)
+4. Длительность в минутах (по умолчанию 60)
+
+Правила:
+- "утром" = 09:00, "днём" = 13:00, "вечером" = 18:00
+- "через час" = текущее время + 1 час
+- "через пару часов" = +2 часа
+- "на следующей неделе" = +7 дней
+- "перед обедом" = 12:00
+- "после обеда" = 14:00
+- Если время не указано - ставь 10:00
+- Если дата не указана - ставь сегодня (если время не прошло) или завтра
+
+Верни ТОЛЬКО JSON без markdown:
+{{"title": "название", "date": "YYYY-MM-DD", "time": "HH:MM", "duration": 60}}"""
+
+    try:
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": text}
+            ],
+            temperature=0,
+            max_tokens=150
+        )
+        
+        result_text = response.choices[0].message.content.strip()
+        logger.info(f"GPT ответ: {result_text}")
+        
+        # Парсим JSON
+        # Убираем возможные markdown-обёртки
+        if result_text.startswith("```"):
+            result_text = result_text.split("```")[1]
+            if result_text.startswith("json"):
+                result_text = result_text[4:]
+        result_text = result_text.strip()
+        
+        data = json.loads(result_text)
+        
+        title = data.get("title", "Встреча")
+        date_str = data.get("date", now.strftime("%Y-%m-%d"))
+        time_str = data.get("time", "10:00")
+        duration = data.get("duration", 60)
+        
+        # Собираем datetime
+        start_time = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+        end_time = start_time + timedelta(minutes=duration)
+        
+        logger.info(f"AI парсинг: '{text}' -> title='{title}', start={start_time}, end={end_time}")
+        
+        return title, start_time, end_time
+        
+    except Exception as e:
+        logger.error(f"Ошибка AI парсинга: {e}, использую fallback")
+        # Fallback на простой парсинг
+        return parse_meeting_time_simple(text)
+
+
+def parse_meeting_time_simple(text: str) -> tuple[str, datetime, datetime]:
+    """Простой fallback-парсер на regex"""
+    now = datetime.now()
     
-    # 1. Точное время: 15:00, 10.30, 9 00
-    time_pattern = r'(\d{1,2})[:\.\s](\d{2})'
-    time_match = re.search(time_pattern, text_lower)
-    
-    # 2. Просто час: "в 9", "в 15"
-    hour_only_pattern = r'\bв\s*(\d{1,2})\b(?!\s*[:\.]?\s*\d)'
-    hour_only_match = re.search(hour_only_pattern, text_lower)
-    
+    # Ищем время
+    time_match = re.search(r'(\d{1,2})[:\.](\d{2})', text)
     if time_match:
         hour = int(time_match.group(1))
         minute = int(time_match.group(2))
-    elif hour_only_match:
-        hour = int(hour_only_match.group(1))
-        minute = 0
-    
-    # 3. Время суток
-    time_of_day_map = {
-        'утр': 9,      # утро, утром
-        'днём': 13, 'днем': 13, ' день': 13,
-        'вечер': 18,   # вечер, вечером
-        'ночь': 21, 'ночью': 21,
-    }
-    
-    if hour is None:
-        for keyword, default_hour in time_of_day_map.items():
-            if keyword in text_lower:
-                hour = default_hour
-                break
-    
-    # Если время всё ещё не определено - ставим через час
-    if hour is None:
-        start_time = today.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
     else:
-        start_time = today.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        hour, minute = 10, 0
     
-    # === ОПРЕДЕЛЯЕМ ДАТУ ===
+    # Ищем дату
     days_offset = 0
-    
-    # Дни недели
-    weekdays = {
-        'понедельник': 0, 'пн': 0,
-        'вторник': 1, 'вт': 1,
-        'сред': 2, 'ср': 2,          # среда, среду
-        'четверг': 3, 'чт': 3,
-        'пятниц': 4, 'пт': 4,        # пятница, пятницу
-        'суббот': 5, 'сб': 5,        # суббота, субботу
-        'воскресень': 6, 'вс': 6,    # воскресенье
-    }
-    
-    found_weekday = None
-    for day_name, day_num in weekdays.items():
-        if day_name in text_lower:
-            found_weekday = day_num
-            break
-    
-    if found_weekday is not None:
-        current_weekday = today.weekday()
-        days_offset = (found_weekday - current_weekday) % 7
-        if days_offset == 0:  # Если тот же день недели
-            # Если время уже прошло - на следующую неделю
-            if hour is not None and (hour < today.hour or (hour == today.hour and minute <= today.minute)):
-                days_offset = 7
+    text_lower = text.lower()
+    if 'завтра' in text_lower:
+        days_offset = 1
     elif 'послезавтра' in text_lower:
         days_offset = 2
-    elif 'завтра' in text_lower:
-        days_offset = 1
-    elif 'сегодня' in text_lower:
-        days_offset = 0
-    else:
-        # Если день не указан и время уже прошло - ставим на завтра
-        if hour is not None and (hour < today.hour or (hour == today.hour and minute <= today.minute)):
-            days_offset = 1
     
-    # Применяем смещение даты
-    meeting_date = today + timedelta(days=days_offset)
-    if hour is not None:
-        start_time = meeting_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    else:
-        start_time = meeting_date.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-    
+    start_time = (now + timedelta(days=days_offset)).replace(
+        hour=hour, minute=minute, second=0, microsecond=0
+    )
     end_time = start_time + timedelta(hours=1)
     
-    # === ОЧИЩАЕМ НАЗВАНИЕ ===
-    title = text
-    # Убираем всё что связано с датой/временем
-    patterns_to_remove = [
-        r'\d{1,2}[:\.\s]\d{2}',  # время
-        r'\bв\s*\d{1,2}\b',      # "в 9"
-        r'\b(сегодня|завтра|послезавтра)\b',
-        r'\b(понедельник|вторник|сред\w*|четверг|пятниц\w*|суббот\w*|воскресень\w*)\b',
-        r'\b(пн|вт|ср|чт|пт|сб|вс)\b',
-        r'\b(утр\w*|днём|днем|день|вечер\w*|ночь\w*)\b',
-        r'\b(в|на|к)\b',
-    ]
-    
-    for pattern in patterns_to_remove:
-        title = re.sub(pattern, ' ', title, flags=re.IGNORECASE)
-    
-    title = ' '.join(title.split()).strip()
-    
-    if not title:
-        title = "Встреча"
-    
-    logger.info(f"Парсинг: '{text}' -> title='{title}', date={start_time.strftime('%d.%m.%Y %H:%M')}")
+    # Название - убираем время и даты
+    title = re.sub(r'\d{1,2}[:\.]?\d{0,2}', '', text)
+    title = re.sub(r'(завтра|послезавтра|сегодня|в|на|утром|вечером|днём)', '', title, flags=re.IGNORECASE)
+    title = ' '.join(title.split()).strip() or "Встреча"
     
     return title, start_time, end_time
 
@@ -328,8 +309,7 @@ async def create_calendar_event(text: str) -> tuple[bool, str]:
         logger.error("Google Calendar сервис не создан!")
         return False, "Google Calendar не настроен. Добавьте GOOGLE_CREDENTIALS_JSON."
     
-    title, start_time, end_time = parse_meeting_time(text)
-    logger.info(f"Парсинг встречи: title='{title}', start={start_time}, end={end_time}")
+    title, start_time, end_time = await parse_meeting_with_ai(text)
     
     event = {
         'summary': title,
