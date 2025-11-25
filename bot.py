@@ -328,7 +328,7 @@ async def create_notion_task(text: str) -> tuple[bool, str]:
                 ]
             },
             "Status Update": {
-                "select": {
+                "status": {
                     "name": "Not started"
                 }
             },
