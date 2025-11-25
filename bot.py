@@ -38,11 +38,19 @@ user_modes = {}
 MODE_TASK = "task"
 MODE_MEETING = "meeting"
 
-# Клавиатура меню
+# Клавиатуры меню
 def get_main_keyboard():
-    """Создание главной клавиатуры"""
+    """Создание главной клавиатуры выбора"""
     keyboard = [
         [KeyboardButton("📝 Задача"), KeyboardButton("📅 Встреча")],
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+
+def get_mode_keyboard():
+    """Клавиатура после выбора режима (с кнопкой назад)"""
+    keyboard = [
+        [KeyboardButton("◀️ Назад")],
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -132,21 +140,35 @@ async def handle_mode_selection(update: Update, context: CallbackContext) -> Non
     if "📝 Задача" in text:
         user_modes[user_id] = MODE_TASK
         await update.message.reply_text(
-            "📝 Режим: *Задача*\n\nТеперь отправь голосовое сообщение, и я создам задачу в Todoist.",
-            reply_markup=get_main_keyboard(),
+            "✅ Выбрано: *Задача*\n\n"
+            "🎤 Отправь голосовое сообщение, и я создам задачу в Todoist.\n\n"
+            "_Нажми «◀️ Назад» чтобы выбрать другое действие._",
+            reply_markup=get_mode_keyboard(),
             parse_mode="Markdown"
         )
     elif "📅 Встреча" in text:
         user_modes[user_id] = MODE_MEETING
         await update.message.reply_text(
-            "📅 Режим: *Встреча*\n\n"
-            "Отправь голосовое сообщение с описанием встречи.\n"
+            "✅ Выбрано: *Встреча*\n\n"
+            "🎤 Отправь голосовое сообщение с описанием встречи.\n"
             "Можешь указать время, например:\n"
             "• _«Созвон с командой в 15:00»_\n"
-            "• _«Встреча завтра в 10:30»_",
-            reply_markup=get_main_keyboard(),
+            "• _«Встреча завтра в 10:30»_\n\n"
+            "_Нажми «◀️ Назад» чтобы выбрать другое действие._",
+            reply_markup=get_mode_keyboard(),
             parse_mode="Markdown"
         )
+
+
+async def handle_back(update: Update, context: CallbackContext) -> None:
+    """Обработка кнопки Назад"""
+    user_id = update.effective_user.id
+    user_modes[user_id] = None  # Сбрасываем режим
+    
+    await update.message.reply_text(
+        "◀️ Вернулись в меню.\n\nВыбери что хочешь сделать:",
+        reply_markup=get_main_keyboard()
+    )
 
 
 async def get_chat_id(update: Update, context: CallbackContext) -> None:
@@ -295,6 +317,12 @@ def main() -> None:
     app.add_handler(MessageHandler(
         filters.TEXT & filters.Regex(r'^(📝 Задача|📅 Встреча)$'),
         handle_mode_selection
+    ))
+    
+    # Обработка кнопки Назад
+    app.add_handler(MessageHandler(
+        filters.TEXT & filters.Regex(r'^◀️ Назад$'),
+        handle_back
     ))
     
     # Обработка голосовых сообщений
