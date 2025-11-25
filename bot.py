@@ -24,17 +24,20 @@ logger = logging.getLogger(__name__)
 
 # Конфигурация
 BOT_TOKEN = os.getenv('BOT_TOKEN')
-TODOIST_API_TOKEN = os.getenv("TODOIST_API_TOKEN")
 GOOGLE_CALENDAR_ID = os.getenv("GOOGLE_CALENDAR_ID", "primary")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+NOTION_API_KEY = os.getenv("NOTION_API_KEY")
+NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
 
 # Проверка наличия токенов
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не задан! Установите переменную окружения.")
-if not TODOIST_API_TOKEN:
-    raise ValueError("TODOIST_API_TOKEN не задан! Установите переменную окружения.")
 if not OPENAI_API_KEY:
     raise ValueError("OPENAI_API_KEY не задан! Установите переменную окружения.")
+if not NOTION_API_KEY:
+    raise ValueError("NOTION_API_KEY не задан! Установите переменную окружения.")
+if not NOTION_DATABASE_ID:
+    raise ValueError("NOTION_DATABASE_ID не задан! Установите переменную окружения.")
 
 # Инициализация OpenAI клиента
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
@@ -226,7 +229,7 @@ async def start(update: Update, context: CallbackContext) -> None:
     
     await update.message.reply_text(
         "👋 Привет! Я помогу создать задачу или встречу.\n\n"
-        "📝 *Задача* — отправлю в Todoist\n"
+        "📝 *Задача* — отправлю в Notion\n"
         "📅 *Встреча* — добавлю в Google Calendar\n\n"
         "Выбери режим и отправь голосовое сообщение!",
         reply_markup=get_main_keyboard(),
@@ -244,7 +247,7 @@ async def handle_mode_selection(update: Update, context: CallbackContext) -> Non
         logger.info(f"Пользователь {user_id} выбрал режим: ЗАДАЧА")
         await update.message.reply_text(
             "✅ Выбрано: *Задача*\n\n"
-            "🎤 Отправь голосовое сообщение, и я создам задачу в Todoist.\n\n"
+            "🎤 Отправь голосовое сообщение, и я создам задачу в Notion.\n\n"
             "_Нажми «◀️ Назад» чтобы выбрать другое действие._",
             reply_markup=get_mode_keyboard(),
             parse_mode="Markdown"
@@ -305,18 +308,51 @@ async def recognize_voice(file_path: str) -> str:
             os.remove(mp3_path)
 
 
-async def create_todoist_task(text: str) -> tuple[bool, str]:
-    """Создание задачи в Todoist"""
+async def create_notion_task(text: str) -> tuple[bool, str]:
+    """Создание задачи в Notion"""
+    
+    # Формируем данные для Notion API
+    notion_data = {
+        "parent": {"database_id": NOTION_DATABASE_ID},
+        "properties": {
+            "Title": {
+                "title": [
+                    {
+                        "text": {
+                            "content": text
+                        }
+                    }
+                ]
+            },
+            "Status Update": {
+                "select": {
+                    "name": "Not started"
+                }
+            },
+            "Assigned to": {
+                "select": {
+                    "name": "Vlad"
+                }
+            }
+        }
+    }
+    
     async with httpx.AsyncClient() as client:
         response = await client.post(
-            "https://api.todoist.com/rest/v2/tasks",
-            headers={"Authorization": f"Bearer {TODOIST_API_TOKEN}"},
-            json={"content": text},
+            "https://api.notion.com/v1/pages",
+            headers={
+                "Authorization": f"Bearer {NOTION_API_KEY}",
+                "Content-Type": "application/json",
+                "Notion-Version": "2022-06-28"
+            },
+            json=notion_data,
         )
     
     if response.status_code == 200:
+        logger.info(f"Задача создана в Notion: {text}")
         return True, text
     else:
+        logger.error(f"Ошибка Notion API: {response.status_code} - {response.text}")
         return False, response.text
 
 
@@ -395,9 +431,9 @@ async def handle_voice(update: Update, context: CallbackContext) -> None:
 
         # Выполняем действие в зависимости от режима
         if mode == MODE_TASK:
-            success, result = await create_todoist_task(text)
+            success, result = await create_notion_task(text)
             if success:
-                await processing_msg.edit_text(f"✅ Задача добавлена в Todoist:\n\n📝 {result}")
+                await processing_msg.edit_text(f"✅ Задача добавлена в Notion:\n\n📝 {result}")
             else:
                 await processing_msg.edit_text(f"❌ Ошибка добавления задачи: {result}")
         else:
