@@ -48,6 +48,9 @@ user_modes = {}
 # Хранилище для ожидающих подтверждения встреч
 pending_meetings = {}
 
+# Защита от дублирования сообщений (храним ID обработанных)
+processed_messages = set()
+
 # Режимы работы
 MODE_TASK = "task"
 MODE_MEETING = "meeting"
@@ -577,6 +580,19 @@ async def handle_meeting_callback(update: Update, context: CallbackContext) -> N
 async def handle_voice(update: Update, context: CallbackContext) -> None:
     """Обработка голосовых сообщений"""
     user_id = update.effective_user.id
+    message_id = update.message.message_id
+    
+    # Защита от дублирования (Telegram retry)
+    message_key = f"{user_id}_{message_id}"
+    if message_key in processed_messages:
+        logger.warning(f"Дубликат сообщения {message_key}, пропускаем")
+        return
+    processed_messages.add(message_key)
+    
+    # Очищаем старые записи (храним только последние 100)
+    if len(processed_messages) > 100:
+        processed_messages.clear()
+    
     mode = user_modes.get(user_id)
     
     # Логируем текущий режим
