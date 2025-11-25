@@ -3,8 +3,8 @@ import uuid
 import logging
 import re
 from datetime import datetime, timedelta
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackContext, filters
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, CallbackContext, filters
 from pydub import AudioSegment
 import httpx
 
@@ -44,6 +44,9 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 # Хранение режима для каждого пользователя
 user_modes = {}
+
+# Хранилище для ожидающих подтверждения встреч
+pending_meetings = {}
 
 # Режимы работы
 MODE_TASK = "task"
@@ -364,18 +367,26 @@ async def create_notion_task(text: str) -> tuple[bool, str]:
         return False, response.text
 
 
-async def create_calendar_event(text: str) -> tuple[bool, str]:
-    """Создание события в Google Calendar"""
-    logger.info(f"Создаю событие в календаре: {text}")
-    
-    service = get_google_calendar_service()
-    
-    if not service:
-        logger.error("Google Calendar сервис не создан!")
-        return False, "Google Calendar не настроен. Добавьте GOOGLE_CREDENTIALS_JSON."
-    
-    title, start_time, end_time = await parse_meeting_with_ai(text)
-    
+def check_calendar_busy(service, start_time: datetime, end_time: datetime) -> list:
+    """Проверка занятости времени в календаре"""
+    try:
+        events_result = service.events().list(
+            calendarId=GOOGLE_CALENDAR_ID,
+            timeMin=start_time.isoformat() + '+03:00',
+            timeMax=end_time.isoformat() + '+03:00',
+            singleEvents=True,
+            orderBy='startTime'
+        ).execute()
+        
+        events = events_result.get('items', [])
+        return events
+    except Exception as e:
+        logger.error(f"Ошибка проверки занятости: {e}")
+        return []
+
+
+def create_event_in_calendar(service, title: str, start_time: datetime, end_time: datetime) -> tuple[bool, str]:
+    """Создание события в календаре (без проверки)"""
     event = {
         'summary': title,
         'start': {
@@ -389,7 +400,7 @@ async def create_calendar_event(text: str) -> tuple[bool, str]:
     }
     
     try:
-        created_event = service.events().insert(
+        service.events().insert(
             calendarId=GOOGLE_CALENDAR_ID,
             body=event
         ).execute()
@@ -399,6 +410,106 @@ async def create_calendar_event(text: str) -> tuple[bool, str]:
     except Exception as e:
         logger.error(f"Ошибка Google Calendar: {e}")
         return False, str(e)
+
+
+async def create_calendar_event(text: str, user_id: int) -> tuple[str, dict | None]:
+    """
+    Проверка и подготовка события в Google Calendar.
+    Возвращает:
+    - ("created", None) — если создано
+    - ("conflict", event_data) — если есть конфликт, нужно подтверждение
+    - ("error", None) — если ошибка
+    """
+    logger.info(f"Создаю событие в календаре: {text}")
+    
+    service = get_google_calendar_service()
+    
+    if not service:
+        logger.error("Google Calendar сервис не создан!")
+        return "error", {"message": "Google Calendar не настроен. Добавьте GOOGLE_CREDENTIALS_JSON."}
+    
+    title, start_time, end_time = await parse_meeting_with_ai(text)
+    
+    # Проверяем занятость
+    busy_events = check_calendar_busy(service, start_time, end_time)
+    
+    event_data = {
+        "title": title,
+        "start_time": start_time,
+        "end_time": end_time,
+        "service": service
+    }
+    
+    if busy_events:
+        # Есть конфликт — формируем список занятых событий
+        conflicts = []
+        for ev in busy_events:
+            ev_title = ev.get('summary', 'Без названия')
+            ev_start = ev.get('start', {}).get('dateTime', '')[:16].replace('T', ' ')
+            conflicts.append(f"• {ev_title} ({ev_start})")
+        
+        event_data["conflicts"] = conflicts
+        event_data["formatted_time"] = start_time.strftime("%d.%m.%Y в %H:%M")
+        
+        # Сохраняем для подтверждения
+        pending_meetings[user_id] = event_data
+        
+        return "conflict", event_data
+    
+    # Нет конфликта — создаём сразу
+    success, result = create_event_in_calendar(service, title, start_time, end_time)
+    
+    if success:
+        return "created", {"message": result}
+    else:
+        return "error", {"message": result}
+
+
+async def handle_meeting_callback(update: Update, context: CallbackContext) -> None:
+    """Обработка кнопок подтверждения встречи"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = update.effective_user.id
+    action = query.data
+    
+    if action == "meeting_confirm":
+        # Получаем сохранённые данные встречи
+        event_data = pending_meetings.get(user_id)
+        
+        if not event_data:
+            await query.edit_message_text("⚠️ Данные встречи не найдены. Попробуйте ещё раз.")
+            return
+        
+        # Создаём встречу
+        success, result = create_event_in_calendar(
+            event_data["service"],
+            event_data["title"],
+            event_data["start_time"],
+            event_data["end_time"]
+        )
+        
+        # Удаляем из pending
+        del pending_meetings[user_id]
+        
+        if success:
+            await query.edit_message_text(f"✅ Встреча добавлена в календарь:\n\n📅 {result}")
+        else:
+            await query.edit_message_text(f"❌ Ошибка создания встречи: {result}")
+    
+    elif action == "meeting_cancel":
+        # Удаляем из pending
+        if user_id in pending_meetings:
+            del pending_meetings[user_id]
+        
+        await query.edit_message_text("❌ Встреча отменена.")
+    
+    # Показываем меню
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="Что дальше? Выбери действие:",
+        reply_markup=get_main_keyboard()
+    )
 
 
 async def handle_voice(update: Update, context: CallbackContext) -> None:
@@ -445,17 +556,47 @@ async def handle_voice(update: Update, context: CallbackContext) -> None:
             else:
                 await processing_msg.edit_text(f"❌ Ошибка добавления задачи: {result}")
         else:
-            success, result = await create_calendar_event(text)
-            if success:
-                await processing_msg.edit_text(f"✅ Встреча добавлена в календарь:\n\n📅 {result}")
-            else:
-                await processing_msg.edit_text(f"❌ Ошибка создания встречи: {result}")
-
-        # Показываем меню выбора после действия
-        await update.message.reply_text(
-            "Что дальше? Выбери действие:",
-            reply_markup=get_main_keyboard()
-        )
+            status, data = await create_calendar_event(text, user_id)
+            
+            if status == "created":
+                await processing_msg.edit_text(f"✅ Встреча добавлена в календарь:\n\n📅 {data['message']}")
+                # Показываем меню
+                await update.message.reply_text(
+                    "Что дальше? Выбери действие:",
+                    reply_markup=get_main_keyboard()
+                )
+            
+            elif status == "conflict":
+                # Есть конфликт — показываем предупреждение с кнопками
+                conflicts_text = "\n".join(data["conflicts"])
+                
+                keyboard = InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("✅ Да, создать", callback_data="meeting_confirm"),
+                        InlineKeyboardButton("❌ Отмена", callback_data="meeting_cancel")
+                    ]
+                ])
+                
+                await processing_msg.edit_text(
+                    f"⚠️ *Внимание! Время занято:*\n\n"
+                    f"{conflicts_text}\n\n"
+                    f"📅 Новая встреча: *{data['title']}*\n"
+                    f"🕐 {data['formatted_time']}\n\n"
+                    f"Всё равно создать встречу?",
+                    reply_markup=keyboard,
+                    parse_mode="Markdown"
+                )
+                return  # Не показываем меню, ждём ответа
+            
+            else:  # error
+                await processing_msg.edit_text(f"❌ Ошибка создания встречи: {data['message']}")
+                # Показываем меню
+                await update.message.reply_text(
+                    "Что дальше? Выбери действие:",
+                    reply_markup=get_main_keyboard()
+                )
+        
+        return  # Успешно обработано
 
     except Exception as e:
         await update.message.reply_text(
@@ -504,6 +645,9 @@ def main() -> None:
     
     # Обработка голосовых сообщений
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+    
+    # Обработка кнопок подтверждения встречи
+    app.add_handler(CallbackQueryHandler(handle_meeting_callback, pattern="^meeting_"))
     
     # Глобальный обработчик ошибок
     app.add_error_handler(error_handler)
