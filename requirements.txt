@@ -1,6 +1,6 @@
 python-telegram-bot>=20.0
 pydub
-speechrecognition
 httpx
 google-api-python-client
 google-auth
+openai

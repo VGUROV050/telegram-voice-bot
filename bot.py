@@ -6,12 +6,14 @@ from datetime import datetime, timedelta
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackContext, filters
 from pydub import AudioSegment
-import speech_recognition as sr
 import httpx
 
 # Google Calendar imports
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+
+# OpenAI Whisper для распознавания речи
+from openai import OpenAI
 
 # Настройка логирования
 logging.basicConfig(
@@ -24,12 +26,18 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 TODOIST_API_TOKEN = os.getenv("TODOIST_API_TOKEN")
 GOOGLE_CALENDAR_ID = os.getenv("GOOGLE_CALENDAR_ID", "primary")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # Проверка наличия токенов
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не задан! Установите переменную окружения.")
 if not TODOIST_API_TOKEN:
     raise ValueError("TODOIST_API_TOKEN не задан! Установите переменную окружения.")
+if not OPENAI_API_KEY:
+    raise ValueError("OPENAI_API_KEY не задан! Установите переменную окружения.")
+
+# Инициализация OpenAI клиента
+openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 # Хранение режима для каждого пользователя
 user_modes = {}
@@ -84,46 +92,127 @@ def get_google_calendar_service():
 def parse_meeting_time(text: str):
     """
     Парсинг времени встречи из текста.
-    Примеры: "встреча завтра в 15:00", "созвон в 10:30", "митинг в 14:00"
-    Возвращает (название, start_time, end_time) или (text, None, None)
+    Понимает:
+    - Точное время: 15:00, 10.30
+    - Время суток: утро/утром (9:00), день/днём (13:00), вечер/вечером (18:00)
+    - Относительные даты: сегодня, завтра, послезавтра, после завтра
+    - Дни недели: понедельник, вторник, среда и т.д.
+    - Через N часов/минут
     """
-    # Паттерны для времени
-    time_pattern = r'(\d{1,2})[:\.](\d{2})'
-    time_match = re.search(time_pattern, text)
-    
-    if not time_match:
-        # Если время не указано, создаём событие на следующий час
-        now = datetime.now()
-        start_time = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-        end_time = start_time + timedelta(hours=1)
-        return text, start_time, end_time
-    
-    hour = int(time_match.group(1))
-    minute = int(time_match.group(2))
-    
-    # Определяем дату
+    text_lower = text.lower()
     today = datetime.now()
     
-    if "завтра" in text.lower():
-        meeting_date = today + timedelta(days=1)
-    elif "послезавтра" in text.lower():
-        meeting_date = today + timedelta(days=2)
-    else:
-        meeting_date = today
-        # Если время уже прошло, ставим на завтра
-        if hour < today.hour or (hour == today.hour and minute <= today.minute):
-            meeting_date = today + timedelta(days=1)
+    # Нормализация текста: "после завтра" -> "послезавтра"
+    text_lower = re.sub(r'после\s+завтра', 'послезавтра', text_lower)
     
-    start_time = meeting_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    # === ОПРЕДЕЛЯЕМ ВРЕМЯ ===
+    hour = None
+    minute = 0
+    
+    # 1. Точное время: 15:00, 10.30, 9 00
+    time_pattern = r'(\d{1,2})[:\.\s](\d{2})'
+    time_match = re.search(time_pattern, text_lower)
+    
+    # 2. Просто час: "в 9", "в 15"
+    hour_only_pattern = r'\bв\s*(\d{1,2})\b(?!\s*[:\.]?\s*\d)'
+    hour_only_match = re.search(hour_only_pattern, text_lower)
+    
+    if time_match:
+        hour = int(time_match.group(1))
+        minute = int(time_match.group(2))
+    elif hour_only_match:
+        hour = int(hour_only_match.group(1))
+        minute = 0
+    
+    # 3. Время суток
+    time_of_day_map = {
+        'утр': 9,      # утро, утром
+        'днём': 13, 'днем': 13, ' день': 13,
+        'вечер': 18,   # вечер, вечером
+        'ночь': 21, 'ночью': 21,
+    }
+    
+    if hour is None:
+        for keyword, default_hour in time_of_day_map.items():
+            if keyword in text_lower:
+                hour = default_hour
+                break
+    
+    # Если время всё ещё не определено - ставим через час
+    if hour is None:
+        start_time = today.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    else:
+        start_time = today.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    
+    # === ОПРЕДЕЛЯЕМ ДАТУ ===
+    days_offset = 0
+    
+    # Дни недели
+    weekdays = {
+        'понедельник': 0, 'пн': 0,
+        'вторник': 1, 'вт': 1,
+        'сред': 2, 'ср': 2,          # среда, среду
+        'четверг': 3, 'чт': 3,
+        'пятниц': 4, 'пт': 4,        # пятница, пятницу
+        'суббот': 5, 'сб': 5,        # суббота, субботу
+        'воскресень': 6, 'вс': 6,    # воскресенье
+    }
+    
+    found_weekday = None
+    for day_name, day_num in weekdays.items():
+        if day_name in text_lower:
+            found_weekday = day_num
+            break
+    
+    if found_weekday is not None:
+        current_weekday = today.weekday()
+        days_offset = (found_weekday - current_weekday) % 7
+        if days_offset == 0:  # Если тот же день недели
+            # Если время уже прошло - на следующую неделю
+            if hour is not None and (hour < today.hour or (hour == today.hour and minute <= today.minute)):
+                days_offset = 7
+    elif 'послезавтра' in text_lower:
+        days_offset = 2
+    elif 'завтра' in text_lower:
+        days_offset = 1
+    elif 'сегодня' in text_lower:
+        days_offset = 0
+    else:
+        # Если день не указан и время уже прошло - ставим на завтра
+        if hour is not None and (hour < today.hour or (hour == today.hour and minute <= today.minute)):
+            days_offset = 1
+    
+    # Применяем смещение даты
+    meeting_date = today + timedelta(days=days_offset)
+    if hour is not None:
+        start_time = meeting_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    else:
+        start_time = meeting_date.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    
     end_time = start_time + timedelta(hours=1)
     
-    # Убираем время из названия для чистоты
-    title = re.sub(time_pattern, '', text)
-    title = re.sub(r'\s*(в|на|завтра|послезавтра)\s*', ' ', title, flags=re.IGNORECASE)
+    # === ОЧИЩАЕМ НАЗВАНИЕ ===
+    title = text
+    # Убираем всё что связано с датой/временем
+    patterns_to_remove = [
+        r'\d{1,2}[:\.\s]\d{2}',  # время
+        r'\bв\s*\d{1,2}\b',      # "в 9"
+        r'\b(сегодня|завтра|послезавтра)\b',
+        r'\b(понедельник|вторник|сред\w*|четверг|пятниц\w*|суббот\w*|воскресень\w*)\b',
+        r'\b(пн|вт|ср|чт|пт|сб|вс)\b',
+        r'\b(утр\w*|днём|днем|день|вечер\w*|ночь\w*)\b',
+        r'\b(в|на|к)\b',
+    ]
+    
+    for pattern in patterns_to_remove:
+        title = re.sub(pattern, ' ', title, flags=re.IGNORECASE)
+    
     title = ' '.join(title.split()).strip()
     
     if not title:
         title = "Встреча"
+    
+    logger.info(f"Парсинг: '{text}' -> title='{title}', date={start_time.strftime('%d.%m.%Y %H:%M')}")
     
     return title, start_time, end_time
 
@@ -191,15 +280,27 @@ async def get_chat_id(update: Update, context: CallbackContext) -> None:
     await update.message.reply_text(f"Chat ID: {chat_id}")
 
 
-async def recognize_voice(file_path: str, wav_path: str) -> str:
-    """Распознавание голосового сообщения"""
+async def recognize_voice(file_path: str) -> str:
+    """Распознавание голосового сообщения через OpenAI Whisper"""
+    # Конвертируем в mp3 для лучшей совместимости с Whisper
     audio = AudioSegment.from_file(file_path)
-    audio.export(wav_path, format="wav")
+    mp3_path = file_path.replace('.ogg', '.mp3')
+    audio.export(mp3_path, format="mp3")
     
-    recognizer = sr.Recognizer()
-    with sr.AudioFile(wav_path) as source:
-        audio_data = recognizer.record(source)
-        return recognizer.recognize_google(audio_data, language="ru-RU")
+    try:
+        with open(mp3_path, "rb") as audio_file:
+            transcript = openai_client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_file,
+                language="ru",  # Указываем русский язык для лучшего качества
+                response_format="text"
+            )
+        logger.info(f"Whisper распознал: {transcript}")
+        return transcript.strip()
+    finally:
+        # Удаляем временный mp3 файл
+        if os.path.exists(mp3_path):
+            os.remove(mp3_path)
 
 
 async def create_todoist_task(text: str) -> tuple[bool, str]:
@@ -273,7 +374,6 @@ async def handle_voice(update: Update, context: CallbackContext) -> None:
     
     unique_id = uuid.uuid4().hex
     file_path = f"voice_{unique_id}.ogg"
-    wav_path = f"voice_{unique_id}.wav"
 
     try:
         # Уведомляем пользователя
@@ -288,8 +388,8 @@ async def handle_voice(update: Update, context: CallbackContext) -> None:
         voice_file = await update.message.voice.get_file()
         await voice_file.download_to_drive(file_path)
 
-        # Распознаём текст
-        text = await recognize_voice(file_path, wav_path)
+        # Распознаём текст через Whisper
+        text = await recognize_voice(file_path)
         logger.info(f"Распознан текст: {text}")
 
         # Выполняем действие в зависимости от режима
@@ -312,27 +412,16 @@ async def handle_voice(update: Update, context: CallbackContext) -> None:
             reply_markup=get_main_keyboard()
         )
 
-    except sr.UnknownValueError:
-        await update.message.reply_text(
-            "🤷 Не удалось распознать текст. Попробуйте ещё раз.",
-            reply_markup=get_main_keyboard()
-        )
-    except sr.RequestError as e:
-        await update.message.reply_text(
-            f"⚠️ Ошибка сервиса распознавания: {e}",
-            reply_markup=get_main_keyboard()
-        )
-        logger.error(f"Ошибка Speech Recognition: {e}")
     except Exception as e:
         await update.message.reply_text(
             f"❌ Произошла ошибка: {e}",
             reply_markup=get_main_keyboard()
         )
-        logger.error(f"Неожиданная ошибка: {e}")
+        logger.error(f"Ошибка обработки голосового: {e}")
     finally:
-        for path in [file_path, wav_path]:
-            if os.path.exists(path):
-                os.remove(path)
+        # Удаляем временный файл
+        if os.path.exists(file_path):
+            os.remove(file_path)
 
 
 async def error_handler(update: Update, context: CallbackContext) -> None:
