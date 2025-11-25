@@ -59,15 +59,26 @@ def get_google_calendar_service():
     """Получение сервиса Google Calendar"""
     credentials_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
     if not credentials_json:
+        logger.error("GOOGLE_CREDENTIALS_JSON не задан!")
         return None
     
-    import json
-    credentials_info = json.loads(credentials_json)
-    credentials = service_account.Credentials.from_service_account_info(
-        credentials_info,
-        scopes=['https://www.googleapis.com/auth/calendar']
-    )
-    return build('calendar', 'v3', credentials=credentials)
+    try:
+        import json
+        credentials_info = json.loads(credentials_json)
+        logger.info(f"Google credentials загружены для: {credentials_info.get('client_email', 'unknown')}")
+        
+        credentials = service_account.Credentials.from_service_account_info(
+            credentials_info,
+            scopes=['https://www.googleapis.com/auth/calendar']
+        )
+        # cache_discovery=False убирает предупреждение о file_cache
+        return build('calendar', 'v3', credentials=credentials, cache_discovery=False)
+    except json.JSONDecodeError as e:
+        logger.error(f"Ошибка парсинга GOOGLE_CREDENTIALS_JSON: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Ошибка создания Google Calendar сервиса: {e}")
+        return None
 
 
 def parse_meeting_time(text: str):
@@ -208,12 +219,16 @@ async def create_todoist_task(text: str) -> tuple[bool, str]:
 
 async def create_calendar_event(text: str) -> tuple[bool, str]:
     """Создание события в Google Calendar"""
+    logger.info(f"Создаю событие в календаре: {text}")
+    
     service = get_google_calendar_service()
     
     if not service:
+        logger.error("Google Calendar сервис не создан!")
         return False, "Google Calendar не настроен. Добавьте GOOGLE_CREDENTIALS_JSON."
     
     title, start_time, end_time = parse_meeting_time(text)
+    logger.info(f"Парсинг встречи: title='{title}', start={start_time}, end={end_time}")
     
     event = {
         'summary': title,
@@ -320,6 +335,19 @@ async def handle_voice(update: Update, context: CallbackContext) -> None:
                 os.remove(path)
 
 
+async def error_handler(update: Update, context: CallbackContext) -> None:
+    """Глобальный обработчик ошибок"""
+    logger.error(f"Произошла ошибка: {context.error}")
+    import traceback
+    logger.error(f"Traceback: {''.join(traceback.format_exception(type(context.error), context.error, context.error.__traceback__))}")
+    
+    if update and update.effective_message:
+        await update.effective_message.reply_text(
+            f"❌ Произошла ошибка: {context.error}",
+            reply_markup=get_main_keyboard()
+        )
+
+
 def main() -> None:
     """Запуск бота"""
     app = Application.builder().token(BOT_TOKEN).connect_timeout(30).read_timeout(30).build()
@@ -342,6 +370,9 @@ def main() -> None:
     
     # Обработка голосовых сообщений
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+    
+    # Глобальный обработчик ошибок
+    app.add_error_handler(error_handler)
 
     logger.info("Бот запущен!")
     app.run_polling()
