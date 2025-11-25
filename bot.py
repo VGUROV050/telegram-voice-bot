@@ -372,73 +372,44 @@ async def create_notion_task(text: str) -> tuple[bool, str]:
 
 def check_calendar_busy(service, start_time: datetime, end_time: datetime) -> list:
     """
-    Проверка занятости времени во ВСЕХ календарях пользователя через FreeBusy API.
-    Также проверяет основной календарь для получения названий событий.
+    Проверка занятости времени в календаре через events.list.
     """
     busy_events = []
     
     try:
-        # 1. Используем FreeBusy для проверки всех календарей
-        # Получаем список всех календарей
-        calendar_list = service.calendarList().list().execute()
-        calendar_ids = [cal['id'] for cal in calendar_list.get('items', [])]
+        # Форматируем время для API
+        time_min = start_time.isoformat()
+        time_max = end_time.isoformat()
         
-        logger.info(f"Проверяю занятость в {len(calendar_ids)} календарях")
+        # Добавляем timezone если нет
+        if '+' not in time_min and 'Z' not in time_min:
+            time_min += '+03:00'
+        if '+' not in time_max and 'Z' not in time_max:
+            time_max += '+03:00'
         
-        # FreeBusy запрос
-        freebusy_query = {
-            "timeMin": start_time.isoformat() + '+03:00',
-            "timeMax": end_time.isoformat() + '+03:00',
-            "items": [{"id": cal_id} for cal_id in calendar_ids]
-        }
+        logger.info(f"Проверяю занятость: {time_min} - {time_max}")
         
-        freebusy_result = service.freebusy().query(body=freebusy_query).execute()
+        # Получаем события из основного календаря
+        events_result = service.events().list(
+            calendarId=GOOGLE_CALENDAR_ID,
+            timeMin=time_min,
+            timeMax=time_max,
+            singleEvents=True,
+            orderBy='startTime'
+        ).execute()
         
-        # Собираем занятые слоты
-        for cal_id, cal_data in freebusy_result.get('calendars', {}).items():
-            busy_slots = cal_data.get('busy', [])
-            for slot in busy_slots:
-                busy_events.append({
-                    'calendar': cal_id,
-                    'start': slot.get('start'),
-                    'end': slot.get('end')
-                })
+        events = events_result.get('items', [])
+        logger.info(f"Найдено событий: {len(events)}")
         
-        # 2. Если есть занятость, получаем детали событий из основного календаря
-        if busy_events:
-            # Пробуем получить названия событий
-            for cal_id in calendar_ids:
-                try:
-                    events_result = service.events().list(
-                        calendarId=cal_id,
-                        timeMin=start_time.isoformat() + '+03:00',
-                        timeMax=end_time.isoformat() + '+03:00',
-                        singleEvents=True,
-                        orderBy='startTime'
-                    ).execute()
-                    
-                    for event in events_result.get('items', []):
-                        # Добавляем детали события
-                        event_start = event.get('start', {}).get('dateTime', event.get('start', {}).get('date', ''))
-                        busy_events.append({
-                            'summary': event.get('summary', 'Занято'),
-                            'start': event_start,
-                            'calendar': cal_id
-                        })
-                except Exception as e:
-                    logger.warning(f"Не удалось получить события из {cal_id}: {e}")
+        for event in events:
+            event_start = event.get('start', {}).get('dateTime', event.get('start', {}).get('date', ''))
+            busy_events.append({
+                'summary': event.get('summary', 'Занято'),
+                'start': event_start
+            })
+            logger.info(f"Найдено событие: {event.get('summary')} в {event_start}")
         
-        # Убираем дубликаты (оставляем только с названием)
-        seen = set()
-        unique_events = []
-        for ev in busy_events:
-            if 'summary' in ev:
-                key = (ev.get('summary'), ev.get('start'))
-                if key not in seen:
-                    seen.add(key)
-                    unique_events.append(ev)
-        
-        return unique_events if unique_events else busy_events
+        return busy_events
         
     except Exception as e:
         logger.error(f"Ошибка проверки занятости: {e}")
