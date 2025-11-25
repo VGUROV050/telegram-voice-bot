@@ -312,6 +312,9 @@ async def create_notion_task(text: str) -> tuple[bool, str]:
     """Создание задачи в Notion"""
     
     # Формируем данные для Notion API
+    # Сегодняшняя дата для Due Date
+    today = datetime.now().strftime("%Y-%m-%d")
+    
     notion_data = {
         "parent": {"database_id": NOTION_DATABASE_ID},
         "properties": {
@@ -329,9 +332,14 @@ async def create_notion_task(text: str) -> tuple[bool, str]:
                     "name": "Not started"
                 }
             },
-            "Assigned to": {
+            "Due Date": {
+                "date": {
+                    "start": today
+                }
+            },
+            "Type": {
                 "select": {
-                    "name": "Vlad"
+                    "name": "Unsorted"
                 }
             }
         }
