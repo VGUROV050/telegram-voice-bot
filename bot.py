@@ -25,6 +25,8 @@ logger = logging.getLogger(__name__)
 # Конфигурация
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 GOOGLE_CALENDAR_ID = os.getenv("GOOGLE_CALENDAR_ID", "primary")
+# Дополнительные календари для проверки занятости (через запятую)
+GOOGLE_CALENDAR_IDS_CHECK = os.getenv("GOOGLE_CALENDAR_IDS_CHECK", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
@@ -374,7 +376,8 @@ async def create_notion_task(text: str) -> tuple[bool, str]:
 
 def check_calendar_busy(service, start_time: datetime, end_time: datetime) -> list:
     """
-    Проверка занятости времени в календаре через events.list.
+    Проверка занятости времени во ВСЕХ указанных календарях.
+    Проверяет основной календарь + дополнительные из GOOGLE_CALENDAR_IDS_CHECK.
     """
     busy_events = []
     
@@ -391,25 +394,41 @@ def check_calendar_busy(service, start_time: datetime, end_time: datetime) -> li
         
         logger.info(f"Проверяю занятость: {time_min} - {time_max}")
         
-        # Получаем события из основного календаря
-        events_result = service.events().list(
-            calendarId=GOOGLE_CALENDAR_ID,
-            timeMin=time_min,
-            timeMax=time_max,
-            singleEvents=True,
-            orderBy='startTime'
-        ).execute()
+        # Собираем список всех календарей для проверки
+        calendars_to_check = [GOOGLE_CALENDAR_ID]
         
-        events = events_result.get('items', [])
-        logger.info(f"Найдено событий: {len(events)}")
+        # Добавляем дополнительные календари
+        if GOOGLE_CALENDAR_IDS_CHECK:
+            extra_calendars = [c.strip() for c in GOOGLE_CALENDAR_IDS_CHECK.split(',') if c.strip()]
+            calendars_to_check.extend(extra_calendars)
         
-        for event in events:
-            event_start = event.get('start', {}).get('dateTime', event.get('start', {}).get('date', ''))
-            busy_events.append({
-                'summary': event.get('summary', 'Занято'),
-                'start': event_start
-            })
-            logger.info(f"Найдено событие: {event.get('summary')} в {event_start}")
+        logger.info(f"Проверяю календари: {calendars_to_check}")
+        
+        # Проверяем каждый календарь
+        for calendar_id in calendars_to_check:
+            try:
+                events_result = service.events().list(
+                    calendarId=calendar_id,
+                    timeMin=time_min,
+                    timeMax=time_max,
+                    singleEvents=True,
+                    orderBy='startTime'
+                ).execute()
+                
+                events = events_result.get('items', [])
+                logger.info(f"Календарь {calendar_id}: найдено {len(events)} событий")
+                
+                for event in events:
+                    event_start = event.get('start', {}).get('dateTime', event.get('start', {}).get('date', ''))
+                    busy_events.append({
+                        'summary': event.get('summary', 'Занято'),
+                        'start': event_start,
+                        'calendar': calendar_id
+                    })
+                    logger.info(f"Найдено событие: {event.get('summary')} в {event_start}")
+                    
+            except Exception as e:
+                logger.warning(f"Не удалось проверить календарь {calendar_id}: {e}")
         
         return busy_events
         
