@@ -139,6 +139,7 @@ async def handle_mode_selection(update: Update, context: CallbackContext) -> Non
     
     if "📝 Задача" in text:
         user_modes[user_id] = MODE_TASK
+        logger.info(f"Пользователь {user_id} выбрал режим: ЗАДАЧА")
         await update.message.reply_text(
             "✅ Выбрано: *Задача*\n\n"
             "🎤 Отправь голосовое сообщение, и я создам задачу в Todoist.\n\n"
@@ -148,6 +149,7 @@ async def handle_mode_selection(update: Update, context: CallbackContext) -> Non
         )
     elif "📅 Встреча" in text:
         user_modes[user_id] = MODE_MEETING
+        logger.info(f"Пользователь {user_id} выбрал режим: ВСТРЕЧА")
         await update.message.reply_text(
             "✅ Выбрано: *Встреча*\n\n"
             "🎤 Отправь голосовое сообщение с описанием встречи.\n"
@@ -241,7 +243,18 @@ async def create_calendar_event(text: str) -> tuple[bool, str]:
 async def handle_voice(update: Update, context: CallbackContext) -> None:
     """Обработка голосовых сообщений"""
     user_id = update.effective_user.id
-    mode = user_modes.get(user_id, MODE_TASK)
+    mode = user_modes.get(user_id)
+    
+    # Логируем текущий режим
+    logger.info(f"Пользователь {user_id} отправил голосовое. Текущий режим: {mode}")
+    
+    # Если режим не выбран, просим выбрать
+    if mode is None:
+        await update.message.reply_text(
+            "⚠️ Сначала выбери что хочешь сделать:",
+            reply_markup=get_main_keyboard()
+        )
+        return
     
     unique_id = uuid.uuid4().hex
     file_path = f"voice_{unique_id}.ogg"
@@ -251,8 +264,10 @@ async def handle_voice(update: Update, context: CallbackContext) -> None:
         # Уведомляем пользователя
         if mode == MODE_TASK:
             processing_msg = await update.message.reply_text("🎙 Создаю задачу...")
+            logger.info(f"Обрабатываю как ЗАДАЧУ для пользователя {user_id}")
         else:
             processing_msg = await update.message.reply_text("🎙 Создаю встречу...")
+            logger.info(f"Обрабатываю как ВСТРЕЧУ для пользователя {user_id}")
 
         # Скачиваем аудио
         voice_file = await update.message.voice.get_file()
