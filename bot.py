@@ -248,9 +248,11 @@ async def handle_mode_selection(update: Update, context: CallbackContext) -> Non
     user_id = update.effective_user.id
     text = update.message.text
     
+    logger.info(f"handle_mode_selection: user_id={user_id}, text='{text}'")
+    
     if "📝 Задача" in text:
         user_modes[user_id] = MODE_TASK
-        logger.info(f"Пользователь {user_id} выбрал режим: ЗАДАЧА")
+        logger.info(f"Пользователь {user_id} выбрал режим: ЗАДАЧА, user_modes={user_modes}")
         await update.message.reply_text(
             "✅ Выбрано: *Задача*\n\n"
             "🎤 Отправь голосовое сообщение, и я создам задачу в Notion.\n\n"
@@ -260,7 +262,7 @@ async def handle_mode_selection(update: Update, context: CallbackContext) -> Non
         )
     elif "📅 Встреча" in text:
         user_modes[user_id] = MODE_MEETING
-        logger.info(f"Пользователь {user_id} выбрал режим: ВСТРЕЧА")
+        logger.info(f"Пользователь {user_id} выбрал режим: ВСТРЕЧА, user_modes={user_modes}")
         await update.message.reply_text(
             "✅ Выбрано: *Встреча*\n\n"
             "🎤 Отправь голосовое сообщение с описанием встречи.\n"
@@ -560,11 +562,15 @@ async def handle_voice(update: Update, context: CallbackContext) -> None:
         return
     processed_messages.add(message_key)
     
-    # Очищаем старые записи (храним только последние 100)
-    if len(processed_messages) > 100:
-        processed_messages.clear()
+    # Очищаем старые записи (храним только последние 50)
+    if len(processed_messages) > 50:
+        # Удаляем половину старых, а не все
+        to_remove = list(processed_messages)[:25]
+        for item in to_remove:
+            processed_messages.discard(item)
     
     mode = user_modes.get(user_id)
+    logger.info(f"handle_voice: user_id={user_id}, mode={mode}, user_modes={user_modes}")
     
     # Логируем текущий режим
     logger.info(f"Пользователь {user_id} отправил голосовое. Текущий режим: {mode}")
@@ -680,9 +686,9 @@ def main() -> None:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("chatid", get_chat_id))
     
-    # Обработка кнопок меню
+    # Обработка кнопок меню (более гибкий regex)
     app.add_handler(MessageHandler(
-        filters.TEXT & filters.Regex(r'^(📝 Задача|📅 Встреча)$'),
+        filters.TEXT & filters.Regex(r'(📝\s*Задача|📅\s*Встреча)'),
         handle_mode_selection
     ))
     
