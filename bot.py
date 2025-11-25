@@ -22,6 +22,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Уменьшаем логирование сторонних библиотек
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.WARNING)
+logging.getLogger("googleapiclient").setLevel(logging.WARNING)
+logging.getLogger("google").setLevel(logging.WARNING)
+
 # Конфигурация
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 GOOGLE_CALENDAR_ID = os.getenv("GOOGLE_CALENDAR_ID", "primary")
